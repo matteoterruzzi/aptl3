@@ -417,7 +417,7 @@ class ManifoldsDatabase(LocationsDatabase, EmbeddingsDatabase):
                 n_trees=got_n_trees,
                 utc=str(datetime.utcnow()),
             ))
-            self._db.execute('UPDATE Manifolds SET building = FALSE, ready = TRUE, metadata = ? '
+            self._db.execute('UPDATE Manifolds SET building = 0, ready = 1, metadata = ? '
                              'WHERE manifold_id = ?;', (json.dumps(metadata), manifold_id,))
             self.__logger.info(f'Ann index building finished; Manifold {manifold_id:d} marked as ready.')
             if commit:
@@ -453,7 +453,7 @@ class ManifoldsDatabase(LocationsDatabase, EmbeddingsDatabase):
             self.__logger.debug(f"Created new index on {fn}")
 
             self._db.execute(
-                'UPDATE Manifolds SET building = TRUE, ready = FALSE, metadata = ? '
+                'UPDATE Manifolds SET building = 1, ready = 0, metadata = ? '
                 'WHERE manifold_id = ?;', (json.dumps(metadata), manifold_id))
 
             self.commit()
@@ -549,7 +549,7 @@ class ManifoldsDatabase(LocationsDatabase, EmbeddingsDatabase):
 
             # Set old manifolds as not ready
             self.executemany(
-                'UPDATE Manifolds SET ready = FALSE, merged = TRUE WHERE manifold_id = ?',
+                'UPDATE Manifolds SET ready = 0, merged = 1 WHERE manifold_id = ?',
                 ((mi,) for mi in merged_manifold_ids))
 
             # Commit the very long transaction

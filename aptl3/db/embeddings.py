@@ -84,7 +84,7 @@ class EmbeddingsDatabase(SchemaDatabase):
                 raise ValueError(f'No embedding for {name}')
             old_embedding_id: int = row[0]
             deprecation_name: str = f'{name} DEPRECATED @ UTC {datetime.datetime.utcnow()}'
-            self.execute('UPDATE Embeddings SET name = :name, ready = FALSE '
+            self.execute('UPDATE Embeddings SET name = :name, ready = 0 '
                          'WHERE embedding_id = :embedding_id',
                          {'embedding_id': old_embedding_id,
                           'name': deprecation_name})
@@ -96,7 +96,7 @@ class EmbeddingsDatabase(SchemaDatabase):
         new_embedding: Embedding = self.make_static_embedding_by_name(name)
         with (self._db if commit else nullcontext()):
             c = self.execute('INSERT INTO Embeddings (dim, name, ready) '
-                             'VALUES (?, ?, TRUE)', (new_embedding.get_dim(), name))
+                             'VALUES (?, ?, 1)', (new_embedding.get_dim(), name))
             new_embedding_id: int = c.lastrowid
 
             self.__embedding_names[new_embedding_id] = name

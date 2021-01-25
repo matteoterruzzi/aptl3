@@ -6,6 +6,4 @@ numpy
 requests
 requests-cache
 sentence-transformers
-tensorflow~=2.3
-tensorflow-hub
 scipy
