@@ -26,7 +26,10 @@ class SearchDatabase(ProcrusteanDatabase):
             query_media_id: bytes = bytes.fromhex(q)
         except ValueError:
             _url = 'data:,' + q
-            query_media_id: bytes = self.url_to_media_id(_url)
+            try:
+                query_media_id: bytes = self.url_to_media_id(_url)
+            except Exception:
+                query_media_id: bytes = bytes.fromhex('deadbeef')
 
             def _v_gen():
                 self.__logger.debug(f'Looking up by sentence embedding ...')

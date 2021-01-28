@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS Media (
 CREATE TABLE IF NOT EXISTS Embeddings (
     embedding_id INTEGER PRIMARY KEY AUTOINCREMENT,
     dim SMALLINT NOT NULL,
-    name TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL UNIQUE,  -- short name
+    version TEXT NOT NULL DEFAULT '',  -- model and version identifier
     ready BOOLEAN NOT NULL DEFAULT 0
 );
 
@@ -48,6 +49,7 @@ CREATE TABLE IF NOT EXISTS Thumbnails (
 
 CREATE TABLE IF NOT EXISTS MediaLocations (
 	url URL NOT NULL PRIMARY KEY, -- data urls can be used for sentences as media
+	hash_function TEXT NULL DEFAULT NULL, -- used to produce the media_id
 	media_id BLOB NULL REFERENCES Media ON DELETE CASCADE,
 	ts_first_access DATETIME NOT NULL,
 	ts_last_access DATETIME NOT NULL,

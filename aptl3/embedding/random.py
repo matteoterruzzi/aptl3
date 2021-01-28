@@ -13,6 +13,9 @@ class NonLSHEmbedding(Embedding):
     def get_dim(self) -> int:
         return self.__dim
 
+    def get_version(self) -> str:
+        return f'aptl3/r-{self.__dim:d}'
+
     def transform(self, *, url: str = None, data: bytes = None) -> np.ndarray:
         if data is None:
             raise NotImplementedError

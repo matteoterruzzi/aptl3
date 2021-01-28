@@ -15,6 +15,11 @@ class Embedding(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_version(self) -> str:
+        """{python_module}/{handle}"""
+        raise NotImplementedError
+
+    @abstractmethod
     def transform(self, *, url: Optional[str] = None, data: Optional[bytes] = None) -> ndarray:
         raise NotImplementedError
 

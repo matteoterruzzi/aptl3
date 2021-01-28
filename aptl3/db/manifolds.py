@@ -56,7 +56,7 @@ class ManifoldsDatabase(LocationsDatabase, EmbeddingsDatabase):
         except KeyError:
             c = self._db.execute(
                 'SELECT metadata, dim '
-                'FROM Manifolds NATURAL JOIN Embeddings '
+                'FROM Manifolds JOIN Embeddings ON Manifolds.embedding_id = Embeddings.embedding_id '
                 'WHERE manifold_id = ?', (manifold_id,))
             res = c.fetchone()
             if res is None:
@@ -90,7 +90,7 @@ class ManifoldsDatabase(LocationsDatabase, EmbeddingsDatabase):
     ) -> Iterable[Tuple[int, int, float]]:
         c = self._db.execute(
             'SELECT M.manifold_id '
-            'FROM Manifolds M NATURAL JOIN Embeddings E '
+            'FROM Manifolds M JOIN Embeddings E ON M.embedding_id = E.embedding_id '
             'WHERE M.ready AND E.ready AND E.embedding_id = ? '
             'ORDER BY M.manifold_id DESC ', (embedding_id,))
         for manifold_id, in c:
@@ -219,6 +219,8 @@ class ManifoldsDatabase(LocationsDatabase, EmbeddingsDatabase):
                     # FIXME: don't fetch data of local files (remember image files will not always be fully read).
                     v = embedding.transform(url=url, data=self.fetch(url))
                 except Exception as ex:
+                    if not isinstance(ex, RequestIgnored):
+                        self.__logger.debug('Exception in embedding job:', exc_info=True)
                     _output_queue.put((ex, None, media_id))
                 else:
                     _annoy_input_queue.put((v, media_id))
@@ -291,8 +293,7 @@ class ManifoldsDatabase(LocationsDatabase, EmbeddingsDatabase):
                             ignored += 1
                         else:
                             failures += 1
-                            import traceback
-                            traceback.print_exc()
+                            self.__logger.error(f'{type(ex).__name__}: {str(ex)}   ')
                         msg = f'{type(ex).__name__}: {str(ex)}'
                         upd_holes += [(msg, manifold_id, media_id)]
                     _output_queue.task_done()
@@ -557,27 +558,8 @@ class ManifoldsDatabase(LocationsDatabase, EmbeddingsDatabase):
 
             return manifold_id, inserted
 
-    def print_manifolds(self):
-        w = 90
-        embedding_names = dict()
-        c = self.execute(
-            'SELECT embedding_id, dim, ready, name FROM Embeddings')
-        print()
-        print()
-        print('Embeddings:')
-        print()
-        print(" embedding_id\t dim\tstatus   \tname")
-        print('─' * w)
-        for embedding_id, dim, ready, name in c:
-            try:
-                status: str = {
-                    True: '\033[92mREADY    \033[0m',
-                }[ready]
-            except KeyError:
-                status: str = '\033[33mUNKNOWN  \033[0m'
-            embedding_names[embedding_id] = name
-            print(f" {embedding_id:12d}\t{dim:4d}\t{status:s}\t{name}")
-        print('─' * w)
+    def print_manifolds(self, *, w=90):
+        self.print_embeddings(w=w)
 
         c = self.execute(
             'SELECT embedding_id, manifold_id, ready, building, merged, inactive, metadata '

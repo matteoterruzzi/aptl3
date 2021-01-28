@@ -1,9 +1,12 @@
 annoy~=1.17
+ofa>=0.1.0
 Pillow~=7.2
 PyQt5~=5.15
 pycocotools~=2.0
 numpy
 requests
 requests-cache
-sentence-transformers
+sentence-transformers>=0.4.1
+torchvision>=0.8.2
 scipy
+xxhash>=2.0.0

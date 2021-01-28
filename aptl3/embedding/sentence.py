@@ -10,12 +10,16 @@ class SentenceEmbedding(Embedding):
 
     def __init__(self):
         from sentence_transformers import SentenceTransformer
+        self.__model_name = 'distiluse-base-multilingual-cased'
         # self.__text_embed = hub.KerasLayer("https://tfhub.dev/google/universal-sentence-encoder-multilingual/3")
-        self.__text_embed = SentenceTransformer('distiluse-base-multilingual-cased')
+        self.__text_embed = SentenceTransformer(self.__model_name)
         self.__dim = self.__text_embed[-1].out_features
 
     def get_dim(self) -> int:
         return self.__dim
+
+    def get_version(self) -> str:
+        return 'sentence_transformers/' + self.__model_name
 
     def transform(self, *, url: str = None, data: bytes = None) -> np.ndarray:
         return next(iter(self.transform_batch([url])))
