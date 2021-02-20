@@ -2,14 +2,17 @@ aptl3
 =====
 
 ![Python package](https://github.com/matteoterruzzi/aptl3/workflows/Python%20package/badge.svg)
+[![Documentation Status](https://readthedocs.org/projects/aptl3/badge/?version=latest)](https://aptl3.readthedocs.io/en/latest/?badge=latest)
 
-This is a library and a Qt desktop application whose goal is to search and explore a private collection of media,
-using a technique called Generalized Procrustes analysis, applied on neural embeddings extracted by pretrained models already available on the net.
+aptl3 is a library and a Qt desktop application whose goal is to help you access a private collection of media by
+providing a natural interface, with search and exploration functionalities, to a neural embeddings database, built using
+pretrained models (already available on the net), joined to perform cross-modal retrieval using different AI techniques.
 
-The idea is to ease the management of a large multimedia collection by letting the machine use its own language to understand
-the contents of files and annotations, and then give the user an intuitive interface to interrogate such a machine.
+Text-image search on your laptop, in simple words. Plus some scalability and an easy-to-use app.
 
-This repository is a Proof of Concept brought closer to "production" as a desktop application for data scales ranging from
+**Disclaimer**: the project is in early dev. stage and all the APIs are subject to ongoing changes!
+
+This repository contains a Proof of Concept brought closer to "production" as a desktop application for data scales ranging from
 personal use to small groups (e.g. a family) sharing a multimedia archive of memories, like a million of photographs.
 The internal working is based on several other open-source projects,
 including pretrained PyTorch models for feature extraction and [Annoy](https://github.com/spotify/annoy) for the indexing of embedding data.

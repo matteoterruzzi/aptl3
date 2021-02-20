@@ -1,13 +1,12 @@
-import warnings
-
-from PIL import Image, ExifTags, ImageOps, UnidentifiedImageError
 import base64
 import io
 import os
-from numpy import asarray as np_asarray
 import subprocess
+import warnings
 from urllib.request import urlopen, url2pathname
 
+from PIL import Image, ImageOps, UnidentifiedImageError
+from numpy import asarray as np_asarray
 
 ImageError = UnidentifiedImageError
 
@@ -96,16 +95,3 @@ def extractPreviewFromRaw(filePath: str):
     if len(out) <= 0:
         raise Exception('Cannot decode RAW image')
     return out
-
-
-if __name__ == "__main__":
-    sample_images = ['cat.jpg', 'dandelion.jpg',
-                     '/run/user/1000/nuvola/matteo/Foto/2015/2015-06-19 luci maga/IMG_8540.CR2',
-                     '/run/user/1000/nuvola/matteo/Foto/2016/2016-01-02 lampada led/DSC_0519.NEF',
-                     'mountain.jpg', 'parrot.jpg', 'saigon.jpg']
-    from subprocess import Popen, PIPE
-
-    view = Popen(["./qttest0"], stdin=PIPE, stdout=PIPE, stderr=PIPE, encoding="utf8")
-    for path in sample_images:
-        view.stdin.write(
-            'ADD {"fileURL":"file:' + path + '","thumbURL":"' + imageToDataURL(getSmallImage(path)) + '"}\n')
