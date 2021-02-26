@@ -3,10 +3,11 @@ import json
 import logging
 import os
 import signal
+import sys
 import threading
+import traceback
 from collections import Counter
 from datetime import datetime
-from queue import Queue, Empty
 from tempfile import mkstemp
 from time import perf_counter
 from typing import Tuple, Optional, Iterable, Dict, Any
@@ -15,6 +16,7 @@ from annoy import AnnoyIndex
 
 from .embeddings import EmbeddingsDatabase
 from .locations import LocationsDatabase
+from ..am import ActorSystem, Actor
 from ..embedding.abc import RequestIgnored
 
 
@@ -26,9 +28,12 @@ class ManifoldsDatabase(LocationsDatabase, EmbeddingsDatabase):
 
     def __init__(self, data_dir: Optional[str] = None):
         super().__init__(data_dir)
-        self.__logger = logging.getLogger('manifolds')
+        self.__logger = logging.getLogger(__name__)
         self.__manifolds_embedding: Dict[int, int] = dict()
         self.__manifolds_annoy_index: Dict[int, AnnoyIndex] = dict()
+        self.__manifolds_background_build_threads: Dict[
+            int, Tuple[threading.Thread, threading.Event, threading.Event]] = dict()
+        self.__manifolds_bg_monitor_thread: Optional[threading.Thread] = None
 
     def _get_manifold_embedding_id(self, manifold_id: int) -> int:
         try:
@@ -139,22 +144,85 @@ class ManifoldsDatabase(LocationsDatabase, EmbeddingsDatabase):
         self.commit()
         return manifold_id
 
-    def build_new_manifold(self, *, embedding_id: int, metric: str = 'euclidean', n_trees: int = 10) -> Tuple[int, int]:
+    def build_new_manifold(self, *, embedding_id: int, metric: str = 'euclidean', n_trees: int = 10,
+                           notice: Optional[threading.Event] = None,
+                           stop: Optional[threading.Event] = None,
+                           ) -> Tuple[int, int]:
         """Will commit multiple write transactions"""
         with self._db:
             manifold_id = self._make_new_manifold(embedding_id=embedding_id, metric=metric)
-            inserted = self._populate_manifold(manifold_id=manifold_id)
-            self._build_manifold_index(manifold_id, n_trees)
+            inserted = self._populate_manifold(manifold_id=manifold_id, notice=notice, stop=stop)
+            if inserted == 0:
+                self.begin_exclusive_transaction()
+                self.execute('DELETE FROM Manifolds WHERE manifold_id = ?', (manifold_id,))
+                self.commit()
+                # NOTE: the index file is left as is and is not deleted.
+                self.__logger.info(f'No items or holes inserted; Manifold {manifold_id:d} deleted.')
+            else:
+                self._build_manifold_index(manifold_id, n_trees)
             return manifold_id, inserted
 
-    def _populate_manifold(self, *, manifold_id: int) -> int:
+    @staticmethod
+    def _detached_build_new_manifold(data_dir: str, **kwargs) -> None:
+        try:
+            ManifoldsDatabase(data_dir).build_new_manifold(**kwargs)
+        except Exception as ex:
+            print(f'Error in detached manifold build: {type(ex).__name__}: {str(ex)}', file=sys.stderr)
+            traceback.print_exc()
+
+    def __manifolds_bg_monitor(self, parent_thread: threading.Thread):
+        assert parent_thread is not threading.current_thread()
+        parent_thread.join()
+        # NOTE: there should be no other reference to `self`, so this should be safe even from a different thread.
+        self.close_bg_manifold_builds()
+
+    def notify_bg_manifold_build(self, *, embedding_id: Optional[int] = None):
+        """Wakeup or start background manifold build for the given embedding, or all embeddings if id not given."""
+        if embedding_id is None:
+            for embedding_id in self.list_ready_embedding_ids():
+                self.notify_bg_manifold_build(embedding_id=embedding_id)
+            return
+        try:
+            th, notice, stop = self.__manifolds_background_build_threads[embedding_id]
+        except KeyError:
+            if self.__manifolds_bg_monitor_thread is None:
+                self.__manifolds_bg_monitor_thread = threading.Thread(
+                    target=self.__manifolds_bg_monitor,
+                    args=(threading.current_thread(),),
+                    daemon=True)
+                self.__manifolds_bg_monitor_thread.start()
+            notice, stop = threading.Event(), threading.Event()
+            th = threading.Thread(
+                target=self._detached_build_new_manifold,
+                args=(self.get_data_dir(),),
+                kwargs=dict(embedding_id=embedding_id, notice=notice, stop=stop),
+                daemon=False)
+            th.start()
+            self.__manifolds_background_build_threads[embedding_id] = th, notice, stop
+        else:
+            notice.set()
+
+    def close_bg_manifold_builds(self):
+        for th, notice, stop in self.__manifolds_background_build_threads.values():
+            stop.set()
+            notice.set()
+        for embedding_id, (th, notice, stop) in list(self.__manifolds_background_build_threads.items()):
+            self.__logger.debug(f'Waiting for background manifold build with embedding {embedding_id}...')
+            th.join()
+            del self.__manifolds_background_build_threads[embedding_id]
+        self.__logger.debug(f'All threads joined.')
+
+    def _populate_manifold(self, *, manifold_id: int,
+                           notice: Optional[threading.Event] = None,
+                           stop: Optional[threading.Event] = None,
+                           ) -> int:
         """Will commit multiple write transactions"""
         db = self
         embedding_id = self._get_manifold_embedding_id(manifold_id)
         embedding = self.get_embedding(embedding_id)
         index = self._get_annoy_index(manifold_id)
 
-        stop = threading.Event()
+        stop = threading.Event() if stop is None else stop
         booked = 0
         enqueued = 0
         collected = 0
@@ -170,84 +238,13 @@ class ManifoldsDatabase(LocationsDatabase, EmbeddingsDatabase):
         pending_limit = qsize
         write_minimum = qsize // 8
 
-        _embedding_input_queue = _StoppableQueue(maxsize=qsize*2)  # NOTE: all maxsizes are unreachable.
-        _annoy_input_queue = _StoppableQueue(maxsize=qsize*2)
-        _output_queue = Queue(maxsize=qsize*2)
-
         # NOTE: You may notice the system not enqueuing enough jobs to exploit the maximum concurrency.
         #       This can happen after the initial wave of jobs go through the fastest station.
         #       This queue system is designed to be steady and avoids accumulating jobs at the slowest station.
 
-        def _status(_s: str):
-            assert collected == computed + failures + ignored, (
-                f"{collected=} {computed=} {failures=} {ignored=}"
-            )
-            _in_flight_to_be_written = collected - written
-            _in_flight_to_be_enqueued = booked - enqueued
-            _pending_in_other_threads = pending - _in_flight_to_be_written - _in_flight_to_be_enqueued
-            assert (pending == booked - written
-                    and 0 <= pending <= pending_limit
-                    and 0 <= _in_flight_to_be_written <= pending_limit
-                    and 0 <= _in_flight_to_be_enqueued <= pending_limit
-                    and 0 <= _pending_in_other_threads <= pending_limit), (
-                f"{pending_limit=} {pending=} {booked=} {enqueued=} {collected=} {written=} "
-                f"{_in_flight_to_be_enqueued=} {_in_flight_to_be_written=} {_pending_in_other_threads=}")
-            _queue_sizes = _embedding_input_queue.qsize(), _annoy_input_queue.qsize(), _output_queue.qsize()
-            _working_in_other_threads = _pending_in_other_threads - sum(_queue_sizes)
-            assert 0 <= _working_in_other_threads <= pending_limit, (
-                f"{pending_limit=} {_working_in_other_threads=} {_pending_in_other_threads=} {_queue_sizes=}")
-            throughput = computed / (perf_counter() - start_time)
-            print(
-                f"\r{_s:20s} {throughput=:5.2f}/s {computed=:d} {failures=:d} {ignored=:d} {pending=:3d} "
-                f"queues: {_queue_sizes} concurrently working: {_working_in_other_threads}   ",
-                end="\r", flush=True)
-
-        # noinspection PyUnusedLocal
-        def _interrupt_handler(signum, frame):
-            stop.set()
-            print(f'\n  >>> SIGINT Stopping as soon as possible... ')
-
-        def _embedding_job():
-            # TODO: replace with out-of-order batching executor in embedding module
-            while True:
-                try:
-                    url, media_id = _embedding_input_queue.get()
-                except _StoppableQueue.Stopped:
-                    return
-                try:
-                    # NOTE: this is optimized for cached remote resources.
-                    # FIXME: don't fetch data of local files (remember image files will not always be fully read).
-                    v = embedding.transform(url=url, data=self.fetch(url))
-                except Exception as ex:
-                    if not isinstance(ex, RequestIgnored):
-                        self.__logger.debug('Exception in embedding job:', exc_info=True)
-                    _output_queue.put((ex, None, media_id))
-                else:
-                    _annoy_input_queue.put((v, media_id))
-                _embedding_input_queue.task_done()
-
-        def _annoy_job():
-            # NOTE: This has a very bad performance when running the image embedding model.
-            #       And it really is the index.add_item operation taking ~500ms.
-            #       It becomes the slowest worker, much slower than the image embedding,
-            #       but it goes back to ~normal when that model has terminated.
-            #       No problem instead with the sentence embedding model.
-            #       The problem must be caused by the threads badly concurring for something (CPU? I/O? what?)
-            #       TODO: switch to multiprocessing instead of threading, just to try better understanding the issue;
-            item_i = index.get_n_items()
-            while True:
-                try:
-                    v, media_id = _annoy_input_queue.get()
-                except _StoppableQueue.Stopped:
-                    return
-                index.add_item(item_i, v)
-                _output_queue.put((None, item_i, media_id))
-                item_i += 1
-                _annoy_input_queue.task_done()
-
         def _prefetch_jobs():
             return self.execute(
-                'SELECT url, media_id '
+                'SELECT media_id, url '
                 'FROM MediaLocations '
                 'WHERE media_id IS NOT NULL '
                 'AND media_id not in ('
@@ -262,8 +259,35 @@ class ManifoldsDatabase(LocationsDatabase, EmbeddingsDatabase):
             # Ordering should not be important, but will affect the insertion order of items
             # and thus it may affect the performance of some query on manifold items
 
-        def _main_job():
-            nonlocal start_time, booked, enqueued, collected, written, computed, failures, ignored, pending
+        # noinspection PyUnusedLocal
+        def _interrupt_handler(signum, frame):
+            stop.set()
+            if notice is not None:
+                notice.set()
+            print(f'\n  >>> SIGINT Stopping as soon as possible... ')
+
+        self.__logger.info(f'Populating index for manifold {manifold_id}...')
+
+        if threading.main_thread() == threading.current_thread():
+            # Could only call signal in main thread
+            _previous_interrupt_handler = signal.signal(signal.SIGINT, _interrupt_handler)
+
+        with ActorSystem(maxsize=qsize*2) as actor_sys:
+
+            (actor_sys
+             .add_thread('fetch', _MaybeFetchActor(self.get_data_dir()))
+             .add_thread('batch', _EmbeddingBatchingActor(embedding), pool=0)
+             .add_thread('embed', _EmbeddingTransformActor(embedding))
+             .add_thread('annoy', _AnnoyAddActor(index))
+             .add_mailbox('main')
+             .start())
+
+            def _status(_s: str):
+                throughput = computed / actor_sys.elapsed
+                print(
+                    f"\r{_s:20s} ({computed:d} {ignored:d} {failures:d}) {throughput=:5.2f}/s "
+                    f"{actor_sys.status}    ",
+                    end="\r", flush=True)
 
             _jobs_cursor = _prefetch_jobs()
 
@@ -272,31 +296,33 @@ class ManifoldsDatabase(LocationsDatabase, EmbeddingsDatabase):
                 del_holes = []
                 upd_holes = []
 
+                def _some_pending_msgs():
+                    n = 0
+                    while pending - n > 0 and n < write_minimum:
+                        yield actor_sys.ask('main')
+                        n += 1
+                    yield from actor_sys.ask_available('main')
+
                 # Collect previous results
-                while enqueued - collected > 0:
-                    _status('collecting...')
-                    try:
-                        ex, item_i, media_id = _output_queue.get_nowait()
-                    except Empty:
-                        if collected - written < write_minimum:
-                            _status('processing...')
-                            ex, item_i, media_id = _output_queue.get()
-                        else:
-                            break
+                _status('processing...')
+                for media_id, ex, item_i in _some_pending_msgs():
                     collected += 1
                     if ex is None:
                         computed += 1
                         items += [(manifold_id, item_i, media_id)]
                         del_holes += [(manifold_id, media_id)]
                     else:
+                        msg = f'{type(ex).__name__}: {str(ex)}'
                         if isinstance(ex, RequestIgnored):
                             ignored += 1
                         else:
                             failures += 1
-                            self.__logger.error(f'{type(ex).__name__}: {str(ex)}   ')
-                        msg = f'{type(ex).__name__}: {str(ex)}'
+                            tb = traceback.TracebackException.from_exception(ex)
+                            print()
+                            self.__logger.error(msg)
+                            self.__logger.debug(''.join(tb.format()))
                         upd_holes += [(msg, manifold_id, media_id)]
-                    _output_queue.task_done()
+                    _status('processing...')
 
                 # Start db transaction
                 _status('locking...')
@@ -321,7 +347,7 @@ class ManifoldsDatabase(LocationsDatabase, EmbeddingsDatabase):
                     batch = []
                 else:
                     batch = _jobs_cursor.fetchmany(pending_limit - pending)
-                    for _i, (_, __media_id_) in reversed(list(enumerate(batch))):
+                    for _i, (__media_id_, _) in reversed(list(enumerate(batch))):
                         row = self.execute(
                             'SELECT EXISTS('
                             ' SELECT media_id FROM ManifoldItems NATURAL JOIN Manifolds '
@@ -351,7 +377,7 @@ class ManifoldsDatabase(LocationsDatabase, EmbeddingsDatabase):
                     print()
                     self.executemany(
                         "INSERT INTO ManifoldHoles (manifold_id, media_id, msg) VALUES (?, ?, '(COMPUTING)')",
-                        ((manifold_id, mi) for _, mi in batch))
+                        ((manifold_id, mi) for mi, _ in batch))
                     # NOTE: in case of graceful interruption, these the placeholders will have to be filled.
 
                 # End the transaction
@@ -362,38 +388,36 @@ class ManifoldsDatabase(LocationsDatabase, EmbeddingsDatabase):
                 for _job in batch:
                     _status('enqueuing...')
                     enqueued += 1
-                    _embedding_input_queue.put(_job)
+                    actor_sys.tell('fetch', _job)
 
                 # Prepare termination if stopping; terminate if no pending jobs
                 if pending <= 0:
                     _status('terminating...')
-                    _embedding_input_queue.join()
-                    _annoy_input_queue.join()
-                    assert _output_queue.empty()
+                    assert actor_sys.pending == 0, actor_sys.status
                     assert pending == 0, (pending, enqueued, written, ignored, failures)
-                    print()
-                    self.__logger.info(f'Embedding #{embedding_id} is computed for all known media locations.')
-                    break
 
-        # Actually start working
-        _embedding_th = threading.Thread(target=_embedding_job)
-        _annoy_th = threading.Thread(target=_annoy_job)
-        _embedding_th.start()
-        _annoy_th.start()
+                    if notice is not None and not stop.is_set():
+                        # Wait! Let's keep the loop alive... Just wait for an external event.
+                        _status('waiting...')
+                        print()
+                        assert notice.wait()
+                        notice.clear()
+                    else:
+                        print()
+                        break
 
-        self.__logger.info(f'Populating index for manifold {manifold_id}...')
-        _previous_interrupt_handler = signal.signal(signal.SIGINT, _interrupt_handler)
-        _main_job()
-        _embedding_input_queue.stop()
-        _annoy_input_queue.stop()
-        _embedding_th.join()
-        _annoy_th.join()
         if stop.is_set():
             self.__logger.warning(f'Embedding creation interrupted after {failures:d} failures.')
         else:
             _lvl = self.__logger.info if failures == 0 else self.__logger.warning
             _lvl(f'Embedding creation finished with {failures:d} failures.')
-        signal.signal(signal.SIGINT, _previous_interrupt_handler)
+
+        if threading.main_thread() == threading.current_thread():
+            # Could only call signal in main thread
+            # noinspection PyUnboundLocalVariable
+            signal.signal(signal.SIGINT, _previous_interrupt_handler)
+
+        assert computed == index.get_n_items()
         return written
 
     def _build_manifold_index(self, manifold_id: int, n_trees: int, *, commit: bool = True) -> int:
@@ -408,11 +432,11 @@ class ManifoldsDatabase(LocationsDatabase, EmbeddingsDatabase):
             self.__logger.warning('Forest building interrupted.')
         else:
             got_n_trees = index.get_n_trees()
-            # TODO: FIXME: the following UPDATE query is sometimes failing (because the db is locked)
-            #  => maybe start a TX, but consider different method calls...
+            # NOTE: the following UPDATE query was sometimes failing (because the db was locked)
+            # => start a TX, but consider different method calls...
             if not self._db.in_transaction:
                 self.begin_exclusive_transaction()
-            # Question: is the above problem solved?
+            # The above problem seems to be solved...
             metadata = self._get_manifold_metadata(manifold_id)
             metadata.update(dict(
                 n_trees=got_n_trees,
@@ -600,37 +624,77 @@ class ManifoldsDatabase(LocationsDatabase, EmbeddingsDatabase):
     # TODO: add command to remove manifolds that have lost their underlying annoy index (user deleted the file).
 
 
-class _StoppableQueue(Queue):
-    """
-    Extends threading.Queue by adding two methods:
-    - stop: for the controller to stop the producers and consumers
-    - wait_for_stop: for producer and consumers to wait for a stop signal (with timeout)
-    - get: for the consumers to get an item (blocking) or be notified to stop
-    """
-    class Stopped(Exception):
-        pass
+class _MaybeFetchActor(Actor):
+    def __init__(self, db_data_dir):
+        super().__init__()
+        self.db = LocationsDatabase(data_dir=db_data_dir)
 
-    def __init__(self, maxsize=0):
-        super().__init__(maxsize)
-        self.not_stopped = threading.Condition(self.mutex)
-        self.stopped = False
+    def receive(self, msg: Any):
+        media_id, url = msg
+        try:
+            data = None if url.startswith('file:') else self.db.fetch(url)
+        except Exception as ex:
+            _, __, tb = sys.exc_info()
+            ex.with_traceback(tb)
+            return 'main', (media_id, ex, None)
+        else:
+            return 'batch', (media_id, url, data)
 
-    def stop(self):
-        """Stops producers and consumers"""
-        with self.mutex:
-            self.stopped = True
-            self.not_stopped.notify_all()
-            self.not_empty.notify_all()
 
-    def get(self, block=True, timeout=None):
-        """Returns an item or raises StoppableQueue.Stopped"""
-        if not block or timeout is not None:
-            raise NotImplementedError
-        with self.mutex:
-            while not self._qsize():
-                self.not_empty.wait()
-                if self.stopped:
-                    raise _StoppableQueue.Stopped()
-            item = self._get()
-            self.not_full.notify()
-            return item
+class _EmbeddingBatchingActor(Actor):
+    def __init__(self, embedding):
+        super().__init__()
+        self.embedding = embedding
+
+    def receive(self, msg: Any):
+        id_batch, emb_batch = [], None
+        _next_msgs = self.ask_available(block=True, timeout=.1)
+        for _msg in itertools.chain([msg], _next_msgs):
+            media_id, url, data = _msg
+            try:
+                mapped = self.embedding.batching_map(url=url, data=data)
+                emb_batch = self.embedding.batching_reduce(batch=emb_batch, mapped=mapped)
+            except Exception as ex:
+                _, __, tb = sys.exc_info()
+                ex.with_traceback(tb)
+                self.tell('main', (media_id, ex, None))
+            else:
+                id_batch.append(media_id)
+            if len(id_batch) >= self.embedding.batch_size:
+                break
+        if id_batch:
+            return 'embed', (id_batch, emb_batch)
+
+
+class _EmbeddingTransformActor(Actor):
+    def __init__(self, embedding):
+        super().__init__()
+        self.embedding = embedding
+
+    def receive(self, msg: Any):
+        id_batch, emb_batch = msg
+        try:
+            vv = self.embedding.batching_transform(batch=emb_batch)
+        except Exception as ex:
+            _, __, tb = sys.exc_info()
+            ex.with_traceback(tb)
+            for media_id in id_batch:
+                self.tell('main', (media_id, ex, None))
+        else:
+            for media_id, v in zip(id_batch, vv):
+                self.tell('annoy', (media_id, v))
+
+
+class _AnnoyAddActor(Actor):
+    def __init__(self, index: AnnoyIndex):
+        super().__init__()
+        self.index = index
+        self.item_i = index.get_n_items()
+
+    def receive(self, msg: Any):
+        media_id, v = msg
+        self.index.add_item(self.item_i, v)
+        reply = 'main', (media_id, None, self.item_i)
+        self.item_i += 1
+        # assert self.index.get_n_items() == self.item_i
+        return reply

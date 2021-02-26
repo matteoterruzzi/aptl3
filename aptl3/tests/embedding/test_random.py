@@ -13,3 +13,13 @@ def test_random_dim_shape_norm():
             v = e.transform(data=_data)
             assert tuple(v.shape) == (_dim,)
             assert abs(float(np.linalg.norm(v, ord=2, axis=None, keepdims=False) - 1.)) < 1.0e-5
+
+
+def test_batching():
+    _dim = 20
+    e = NonLSHEmbedding(_dim)
+    _url_data_pairs = [(None, _data) for _data in [b"", b" ", b"this is a test sentence"]]
+    vv = e.transform_batch(_url_data_pairs)
+    for v in vv:
+        assert tuple(v.shape) == (_dim,)
+        assert abs(float(np.linalg.norm(v, ord=2, axis=None, keepdims=False) - 1.)) < 1.0e-5

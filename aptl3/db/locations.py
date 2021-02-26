@@ -1,8 +1,9 @@
-import os.path
+import logging
+import os
 import warnings
 from contextlib import nullcontext
-from typing import NamedTuple, Optional, Tuple, Dict
-from urllib.request import urlopen
+from typing import NamedTuple, Optional, Tuple, Dict, Iterator
+from urllib.request import urlopen, pathname2url, url2pathname
 
 from requests_cache import CachedSession
 
@@ -21,7 +22,14 @@ class LocationsDatabase(SchemaDatabase):
     def __init__(self, data_dir: Optional[str] = None):
         super().__init__(data_dir)
 
-        fn = os.path.join(self.get_data_dir(), 'requests_cache')
+        env_var = f'{__name__:s}.requests_cache'.replace('.', '_').upper()
+        fn = os.environ.get(env_var, None)
+        if fn is None:
+            logging.debug(f'Environment variable {env_var} not found.')
+            fn = os.path.join(self.get_data_dir(), 'requests_cache.sqlite')
+        logging.warning(f'Using requests cache at {os.path.abspath(fn)}')
+
+        fn = fn[:-len('.sqlite')] if fn.endswith('.sqlite') else fn
         self.__cached_session = CachedSession(cache_name=fn)
         self.__hash_constructors: Dict[str, callable] = dict()
 
@@ -71,6 +79,8 @@ class LocationsDatabase(SchemaDatabase):
         if url.startswith('http:') or url.startswith('https:') or url.startswith('ftp:'):
             with self.__cached_session.get(url) as resp:
                 return nullcontext(resp.raw)
+        if url.startswith('file:'):
+            return open(url2pathname(url.lstrip('file:')), mode='rb')
         else:
             return urlopen(url)
 
@@ -153,7 +163,8 @@ class LocationsDatabase(SchemaDatabase):
         try:
             new_media_id = self.url_to_media_id(url, hash_function=new_hash_function)
             ex = None
-        except Exception as ex:
+        except Exception as _ex:
+            ex = _ex
             new_media_id = None
         return new_media_id, self.__write_url_media_id(
             url, new_hash_function, new_media_id,
@@ -205,3 +216,50 @@ class LocationsDatabase(SchemaDatabase):
             c.execute(
                 'DELETE FROM Media WHERE media_id = :old_media_id',
                 {'old_media_id': old_media_id})
+
+    def ingest_file_directory(self, source_dir: str, *,
+                              commit: bool = True, update_last_access: bool = True) -> dict:
+        first_access: int = 0
+        failed: int = 0
+        new_failure: int = 0
+        changed: int = 0
+
+        with (self._db if commit else nullcontext()):
+            for i, url in enumerate(walk_file_urls(source_dir=source_dir)):
+
+                res = self.try_ingest_url(url=url, commit=False, update_last_access=update_last_access)
+                media_id, flags, ex = res
+
+                first_access += flags.first_access
+                failed += flags.failed
+                new_failure += flags.new_failure
+                changed += flags.changed
+
+                print(
+                    f"scanned={i+1} "
+                    f"{first_access=} "
+                    f"{failed=} "
+                    f"{new_failure=} "
+                    f"{changed=} ",
+                    end="\r", flush=True)
+        print()
+
+        return dict(
+            scanned=i+1,
+            first_access=first_access,
+            failed=failed,
+            new_failure=new_failure,
+            changed=changed,
+        )
+
+
+def walk_file_urls(source_dir: str) -> Iterator[str]:
+    source_dir = os.path.abspath(source_dir)
+    if not os.path.isdir(source_dir):
+        raise ValueError(source_dir)  # Not a directory
+    sep = os.path.sep
+    for root, dirs, files in os.walk(source_dir):
+        for fname in files:
+            fpath = root + sep + fname
+            # assert os.path.isfile(fpath)
+            yield 'file:' + pathname2url(fpath)

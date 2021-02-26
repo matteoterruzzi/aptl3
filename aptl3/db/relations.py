@@ -5,10 +5,6 @@ from typing import Iterable, Tuple
 from .schema import SchemaDatabase
 
 
-class EquivalenceConsistencyViolation(Exception):
-    pass
-
-
 class RelationsDatabase(SchemaDatabase):
 
     def create_relation(self, metadata: dict, *,

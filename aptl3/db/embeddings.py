@@ -1,4 +1,3 @@
-import datetime
 import logging
 from contextlib import nullcontext
 from functools import lru_cache
@@ -9,6 +8,7 @@ from ..embedding.abc import Embedding, RequestIgnored
 
 
 # TODO: add tools to compute embeddings in a separate process, exploiting their static nature, or passing the data dir.
+#       Maybe bring here a generalized version of what is defined in manifolds.py
 
 
 class DeprecatedEmbeddingVersionException(Exception):
@@ -23,7 +23,7 @@ class EmbeddingsDatabase(SchemaDatabase):
 
     def __init__(self, data_dir: Optional[str] = None):
         super().__init__(data_dir)
-        self.__logger = logging.getLogger('manifolds')
+        self.__logger = logging.getLogger('embeddings')
         # will map embedding id to name and instance
         self.__embedding_names_versions: Dict[int, Tuple[str, str]] = dict()
         self.__embedding_instances: Dict[int, Embedding] = dict()
@@ -38,7 +38,7 @@ class EmbeddingsDatabase(SchemaDatabase):
 
     @classmethod
     @lru_cache(maxsize=None)
-    def make_static_embedding_by_name(cls, name: str) -> Embedding:
+    def make_static_embedding_by_name(cls, name: str, data_dir: Optional[str] = None) -> Embedding:
         if name.startswith('r-'):
             from ..embedding.random import NonLSHEmbedding
             dim = int(name[2:])
@@ -48,7 +48,7 @@ class EmbeddingsDatabase(SchemaDatabase):
             return SentenceEmbedding()
         elif name == 'image':
             from ..embedding.image import ImageEmbedding
-            return ImageEmbedding()
+            return ImageEmbedding(data_dir=data_dir)
         else:
             raise KeyError(f'No embedding runtime available for {name}.')
 
@@ -66,7 +66,7 @@ class EmbeddingsDatabase(SchemaDatabase):
                 name: str = row[0]
                 version: str = row[1]
                 self.__embedding_names_versions[embedding_id] = name, version
-            embedding = self.make_static_embedding_by_name(name)
+            embedding = self.make_static_embedding_by_name(name, data_dir=self.get_data_dir())
             if embedding.get_version() != version:
                 raise DeprecatedEmbeddingVersionException(f"The model {version:s} has been deprecated.")
             self.__embedding_instances[embedding_id] = embedding
@@ -107,7 +107,7 @@ class EmbeddingsDatabase(SchemaDatabase):
             return self.add_embedding(name, commit=False)
 
     def add_embedding(self, name: str, *, commit: bool = True) -> int:
-        new_embedding: Embedding = self.make_static_embedding_by_name(name)
+        new_embedding: Embedding = self.make_static_embedding_by_name(name, data_dir=self.get_data_dir())
         version = new_embedding.get_version()
         with (self._db if commit else nullcontext()):
             c = self.execute('INSERT INTO Embeddings (dim, name, version, ready) '
@@ -119,6 +119,10 @@ class EmbeddingsDatabase(SchemaDatabase):
 
             return new_embedding_id
 
+    def list_ready_embedding_ids(self) -> Iterable[int]:
+        c = self.execute('SELECT embedding_id FROM Embeddings WHERE ready')
+        return [row[0] for row in c]
+
     def get_url_vectors(
             self, url: str, *,
             embedding_ids: Optional[Iterable[int]] = None,
@@ -126,8 +130,7 @@ class EmbeddingsDatabase(SchemaDatabase):
     ) -> Iterable[Tuple[int, Any]]:
         """Computes and yields embedding vector data for the given url."""
         if embedding_ids is None:
-            c = self.execute('SELECT embedding_id FROM Embeddings WHERE ready')
-            embedding_ids = [row[0] for row in c]
+            embedding_ids = self.list_ready_embedding_ids()
         for embedding_id in embedding_ids:
             try:
                 yield embedding_id, self.get_embedding(embedding_id).transform(url=url)

@@ -1,13 +1,53 @@
-import collections
 import json
 import logging
-import sqlite3
+import re
+import tempfile
 from time import perf_counter
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Iterable, NamedTuple, Union, Any
 
 import numpy as np
 
 from .procrustean import ProcrusteanDatabase
+
+
+class _EmbeddingNode(NamedTuple):
+    embedding_id: int
+    vector: Union[np.ndarray, Any]
+
+    @property
+    def rank(self):
+        return 0
+
+    def __repr__(self) -> str:
+        r = self.__class__.__name__
+        fmt = '(' + ', '.join(f'{name}=%r' for name in self._fields) + ')'
+        r += fmt % self._replace(vector=self.vector.shape)
+        return r
+
+
+class _GPANode(NamedTuple):
+    src: _EmbeddingNode
+    gpa_id: int
+    embedding_id: int
+    vector: Union[np.ndarray, Any]
+    dis: float
+
+    @property
+    def rank(self):
+        return self.src.rank + self.dis
+
+    def __repr__(self) -> str:
+        r = self.__class__.__name__
+        fmt = '(' + ', '.join(f'{name}=%r' for name in self._fields) + ')'
+        r += fmt % self._replace(vector=self.vector.shape)
+        return r
+
+
+_SearchNode = Union[
+    _EmbeddingNode,
+    _GPANode,
+    # given a node, we will finally retrieve a set of neighbour vectors
+]
 
 
 class SearchDatabase(ProcrusteanDatabase):
@@ -18,139 +58,144 @@ class SearchDatabase(ProcrusteanDatabase):
     def __init__(self, data_dir: Optional[str] = None):
         super().__init__(data_dir)
         self.__logger = logging.getLogger('search')
+        self.__url_re = re.compile(  # I want it to be simple and not correct
+            r'^(((http|ftp)s?|file)://?|data:[^ ],)[^ ]+$',
+            re.IGNORECASE)
+        self.__results_file = tempfile.NamedTemporaryFile(prefix=f'{__name__}.results.')
+        self._audit_open_files_allowed.add(self.__results_file.fileno())
+        self.__attach_results_db()
 
-    def search(self, q: str, *, n: int = 50, search_k: int = -1) -> Tuple[int, int]:
-        start_time = perf_counter()
+    def get_attach_results_db_query(self) -> str:
+        # NOTE: I would like to use "file:results?mode=memory&cache=shared"
+        #       but it seems buggy with QSqlite
+        return f"ATTACH DATABASE 'file:{self.__results_file.name}' AS results;"
 
+    @staticmethod
+    def get_schema_results_db_script() -> str:
+        return '''
+            CREATE TABLE IF NOT EXISTS results.Results (
+                results_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                metadata TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS results.ResultsMedia (
+                results_id INTEGER NOT NULL REFERENCES Results ON DELETE CASCADE,
+                media_id BLOB NOT NULL,
+                info TEXT NULL,
+                rank REAL NULL
+            );
+        '''
+
+    def __attach_results_db(self):
+        with self._db:
+            self._db.executescript(self.get_attach_results_db_query())
+            self._db.executescript(self.get_schema_results_db_script())
+            c = self.execute("INSERT INTO results.Results (metadata) VALUES ('test')")
+            self.__logger.debug(f'test results.Results id: {c.lastrowid!r}')
+
+    def _gen_search_nodes(self, q: str) -> Iterable[_SearchNode]:
+        q = q.strip()
         try:
             query_media_id: bytes = bytes.fromhex(q)
         except ValueError:
-            _url = 'data:,' + q
-            try:
-                query_media_id: bytes = self.url_to_media_id(_url)
-            except Exception:
-                query_media_id: bytes = bytes.fromhex('deadbeef')
-
-            def _v_gen():
-                self.__logger.debug(f'Looking up by sentence embedding ...')
+            if self.__url_re.match(q):
+                self.__logger.debug('Looking up by url ...')
+                for x_embedding_id, x in self.get_url_vectors(url=q):
+                    self.__logger.debug(f'Computed embedding vector ({x_embedding_id=}) from url')
+                    node = _EmbeddingNode(x_embedding_id, x)
+                    yield node
+                    yield from self._gen_gpa_expansions(node)
+            else:
+                _url = 'data:,' + q
+                self.__logger.debug('Looking up by sentence embedding ...')
                 x_embedding_id = self.get_embedding_id('sentence')
                 x_embedding = self.get_embedding(x_embedding_id)
-                x_path = [f'{x_embedding_id=:d}']
                 x = x_embedding.transform(url=_url)
-                self.__logger.debug(f'Computed embedding vector ({x_embedding_id=})')
-
-                # yield x_embedding_id, x, x_path, 0  # NOTE: don't show similar sentences for this kind of search
-                yield from _gpa_gen(x_embedding_id, x, x_path, 0)
+                self.__logger.debug(f'Computed embedding vector ({x_embedding_id=}) from sentence')
+                node = _EmbeddingNode(x_embedding_id, x)
+                # yield node  # NOTE: don't show similar sentences for this kind of search
+                yield from self._gen_gpa_expansions(node)
         else:
-            def _v_gen():
-                self.__logger.debug(f'Looking up by media_id={q} ...')
-                for x_embedding_id, x in self.get_media_vectors(query_media_id):
-                    self.__logger.debug(f'Retrieved embedding vector ({x_embedding_id=})')
-                    x = np.asarray(x)
-                    x_path = [f'{x_embedding_id=:d}']
-                    yield x_embedding_id, x, x_path, 0
-                    yield from _gpa_gen(x_embedding_id, x, x_path, 0)
+            self.__logger.debug(f'Looking up by media_id={q} ...')
+            for x_embedding_id, x in self.get_media_vectors(query_media_id):
+                self.__logger.debug(f'Retrieved embedding vector ({x_embedding_id=}) from known media')
+                x = np.asarray(x)
+                node = _EmbeddingNode(x_embedding_id, x)
+                yield node
+                yield from self._gen_gpa_expansions(node)
 
-        def _gpa_gen(x_embedding_id, x, x_path, add_dis):
-            self.__logger.debug(f'Looking up GPA models to expand search ...')
-            _c = self.execute(
-                'SELECT gpa_id FROM GeneralizedProcrustesAnalysis '
-                'NATURAL JOIN OrthogonalProcrustesModel '
-                'WHERE embedding_id = ? '
-                'GROUP BY gpa_id', (x_embedding_id,))
-            for gpa_id, in _c:
-                gpa_path = x_path + [f'{gpa_id=:d}']
-                try:
-                    gpa = self.load_generalized_procrustes_analysis(gpa_id)
-                    for y_embedding_id in gpa.orthogonal_models:
-                        if y_embedding_id != x_embedding_id:
-                            y_path = gpa_path + [f'{y_embedding_id=}']
-                            self.__logger.debug(f'Expanding search via GPA #{gpa_id} {y_embedding_id=} ...')
-                            try:
-                                y = gpa.predict(x_embedding_id, y_embedding_id, x.reshape([1, -1])).reshape([-1])
-                                yield y_embedding_id, y, y_path, add_dis + gpa.procrustes_distance
-                            except Exception:
-                                self.__logger.debug(f"Problems with {y_path=}", exc_info=True)
-                except Exception:
-                    self.__logger.debug(f"Problems with {gpa_path=}", exc_info=True)
+    def _gen_gpa_expansions(self, x_node: _EmbeddingNode) -> Iterable[_GPANode]:
+        self.__logger.debug('Looking up GPA models to expand search ...')
+        for gpa_id in self.list_generalized_procrustes_analyzes(src_embedding_id=x_node.embedding_id):
+            gpa = self.load_generalized_procrustes_analysis(gpa_id)
+            for y_embedding_id in gpa.orthogonal_models:
+                if y_embedding_id == x_node.embedding_id:
+                    continue
+                self.__logger.debug(f'Expanding search via GPA #{gpa_id} {y_embedding_id=} ...')
+                y = gpa.predict(x_node.embedding_id, y_embedding_id,
+                                x_node.vector.reshape([1, -1])).reshape([-1])
+                yield _GPANode(x_node, gpa_id, y_embedding_id, y, gpa.procrustes_distance)
 
-        manifold_counter = collections.Counter()
+    def __gen_rows(self, *, results_id: int, nodes: Iterable[_SearchNode], n: int, search_k: int) -> Iterable[dict]:
+        for node in nodes:
+            self.__logger.debug(f'Searching ANN indexes of {repr(node)} ...')
+            for manifold_id, item_i, dis_i in self.find_vector_neighbours(
+                    node.embedding_id, node.vector, n=n, search_k=search_k):
+                params = dict()
+                params['results_id'] = results_id
+                params['manifold_id'] = manifold_id
+                params['item_i'] = item_i
+                params['rank'] = node.rank + dis_i
+                params['info'] = json.dumps({
+                    'node': repr(node),
+                    'manifold_id': manifold_id,
+                    'item_i': item_i,
+                    'dis_i': dis_i,
+                })
+                yield params
 
-        def _r_gen():
-            relation_hits = []
-            for embedding_id, v, path, add_dis in _v_gen():
-                self.__logger.debug(f'-' * 80)
-                self.__logger.debug(f'Searching ANN indexes of {embedding_id=} ({v.shape=} {path=} {add_dis=:.2f}) ...')
-                for scan_count, (manifold_id, item_i, dis_i) in enumerate(self.find_vector_neighbours(
-                        embedding_id, v, n=n, search_k=search_k)):
-                    _c = self.execute(
-                        'SELECT media_id, url FROM MediaLocations NATURAL JOIN ManifoldItems '
-                        'WHERE manifold_id = ? AND item_i = ?', (manifold_id, item_i))
-                    for media_id, url in _c:
-                        rank = (dis_i + add_dis)  # * (len(path) + 1)  # very arbitrary
-                        manifold_counter.update([manifold_id])
-                        params = dict()
-                        params['results_id'] = results_id
-                        params['media_id'] = media_id
-                        params['rank'] = rank
-                        params['info'] = json.dumps({
-                            'manifold_id': manifold_id,
-                            'item_i': item_i,
-                            'path': path,
-                            'dis_i': dis_i,
-                            'add_dis': add_dis,
-                        })
-                        self.__logger.debug(f'{rank=:.2f} {manifold_id=} {dis_i=:.2f} {media_id.hex()} {url}')
+    def search(self, q: str, *,
+               n: int = 50, search_k: int = -1,
+               ) -> Tuple[int, int]:
 
-                        if media_id == query_media_id:
-                            self.__logger.info(f'Query media found in ANN index search with distance {dis_i:.2f}')
+        start_time = perf_counter()
 
-                        _c2 = self.execute('SELECT relation_id, metadata '
-                                           'FROM MediaRelations NATURAL JOIN Relations '
-                                           'WHERE (media_id = :m AND other_media_id = :qm) '
-                                           'OR (media_id = :qm AND other_media_id = :m) ',
-                                           {'m': media_id, 'qm': query_media_id})
-                        for relation_id, r_metadata in _c2:
-                            self.__logger.debug(f'Relation found! {scan_count=} {relation_id=} {r_metadata}')
-                            relation_hits.append(scan_count)
+        nodes: Tuple[_SearchNode, ...] = tuple(self._gen_search_nodes(q))
 
-                        yield params
-                        break
-                    else:
-                        self.__logger.warning(f'No location for {manifold_id=} {item_i=} {dis_i=:.2f} {len(path)=}')
-            if relation_hits:
-                self.__logger.debug(f'Related media found at {relation_hits}')
+        nodes_time = perf_counter()
+        nodes_elapsed_ms = (nodes_time - start_time) * 1000.
+        self.__logger.info(f'Going to start from {len(nodes):d} search nodes. {nodes_elapsed_ms=:.1f}')
 
         with self._db:
-            # self.__logger.debug(f'{self._db.in_transaction=}')
             self.begin_exclusive_transaction()
-            # self.__logger.debug(f'{self._db.in_transaction=}')
 
             metadata = dict(
                 q=q,
                 n=n,
                 search_k=search_k,
-                query_media_id=query_media_id.hex(),
+                nodes=repr(nodes),
             )
             c = self._db.execute('INSERT INTO results.Results (metadata) VALUES (?);',
                                  (json.dumps(metadata),))
             results_id: int = c.lastrowid
             self.__logger.info(f'{results_id=} {metadata=}')
 
-            try:
-                self._db.executemany('INSERT INTO results.ResultsMedia (results_id, media_id, rank, info) '
-                                     'VALUES (:results_id, :media_id, :rank, :info)', _r_gen())
-            except sqlite3.OperationalError as ex:
-                self.__logger.warning(f'{type(ex).__name__}: {str(ex)}')
-                inserted = 0
-            else:
-                c = self.execute('SELECT COUNT(*) FROM results.ResultsMedia WHERE results_id = ?', (results_id,))
-                inserted = c.fetchone()[0]
+            rows = self.__gen_rows(results_id=results_id, nodes=nodes, n=n, search_k=search_k)
 
-            # self.__logger.debug(f'{self._db.in_transaction=}')
+            self._db.executemany(
+                'INSERT INTO results.ResultsMedia (results_id, media_id, rank, info) '
+                'VALUES ('
+                '  :results_id, '
+                '  (SELECT media_id FROM ManifoldItems '
+                '   WHERE manifold_id = :manifold_id AND item_i = :item_i), '
+                '  :rank, :info)', rows)
+
+            c = self.execute('SELECT COUNT(*) FROM results.ResultsMedia WHERE results_id = ?', (results_id,))
+            inserted = c.fetchone()[0]
+
             self._db.commit()
-            # self.__logger.debug(f'{self._db.in_transaction=}')
 
+        ann_elapsed_ms = (perf_counter() - nodes_time) * 1000.
         elapsed_ms = (perf_counter() - start_time) * 1000.
-        self.__logger.info(f'{results_id=} {inserted=} manifold_id {manifold_counter} {elapsed_ms=:.1f}')
+        self.__logger.info(f'{results_id=} {inserted=} {nodes_elapsed_ms=:.1f} {ann_elapsed_ms=:.1f} {elapsed_ms=:.1f}')
         return results_id, inserted

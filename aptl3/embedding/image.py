@@ -1,6 +1,10 @@
+import os
+from typing import Optional, Iterable, Any
+
 import numpy as np
 from ofa.model_zoo import ofa_specialized
 from torchvision.transforms.functional import pil_to_tensor, normalize
+import torch
 from ofa.imagenet_classification.networks.mobilenet_v3 import MobileNetV3
 
 from .abc import Embedding, RequestIgnored
@@ -9,9 +13,19 @@ from ..images import getSmallImage, ImageError
 
 class ImageEmbedding(Embedding):
 
-    def __init__(self):
+    def __init__(self, data_dir=None):
         self.__net_id = "flops@389M_top1@79.1_finetune@75"
-        self.__model, self.__image_size = ofa_specialized(self.__net_id, pretrained=True)
+        __cwd = os.getcwd()
+        if data_dir is not None:
+            _p = os.path.join(data_dir, self.__class__.__module__, self.get_version())
+            _p = os.path.abspath(_p)
+            os.makedirs(_p, exist_ok=True)
+            os.chdir(_p)
+        try:
+            # NOTE: hard-coded download dir of ofa_specialized is under CWD.
+            self.__model, self.__image_size = ofa_specialized(self.__net_id, pretrained=True)
+        finally:
+            os.chdir(__cwd)
         mobi = self.__model
         assert isinstance(mobi, MobileNetV3)
 
@@ -41,7 +55,17 @@ class ImageEmbedding(Embedding):
     def get_version(self) -> str:
         return 'ofa/ofa_specialized/' + self.__net_id + '/fv'
 
+    @property
+    def batch_size(self) -> int:
+        return 4
+
     def transform(self, *, url: str = None, data: bytes = None) -> np.ndarray:
+        x = self._transform_1(url=url, data=data)
+        # x already has the shape of a batch
+        x = self._transform_2(x)
+        return x[0]
+
+    def _transform_1(self, *, url: str = None, data: bytes = None):
 
         assert url is not None or data is not None
         fp = data if data is not None else url
@@ -62,12 +86,17 @@ class ImageEmbedding(Embedding):
         assert len(_input.shape) == 3, _input.shape
         _input = _input.unsqueeze(0)
         assert len(_input.shape) == 4, _input.shape
+        return _input
 
-        v = self.__model(_input).detach().numpy()[0]
-        
-        assert len(v.shape) == 1 and v.shape[0] == self.__dim, v.shape
-        
-        v /= np.sum(v ** 2) ** 0.5  # L2 normalization
+    def _transform_2(self, _input) -> np.ndarray:
+        v = self.__model(_input).detach().numpy()
+        assert len(v.shape) == 2 and v.shape[1] == self.__dim, v.shape
+        v /= np.sum(v ** 2, axis=1, keepdims=True) ** 0.5  # L2 normalization
         return v
 
-    # TODO: reimplement transform_batch
+    def batching_map(self, *, url: Optional[str] = None, data: Optional[bytes] = None):
+        return self._transform_1(url=url, data=data)
+
+    def batching_transform(self, *, batch: Any) -> Iterable[np.ndarray]:
+        batch = torch.cat(batch, 0)
+        return self._transform_2(batch)

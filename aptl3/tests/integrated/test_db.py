@@ -63,7 +63,21 @@ def test_db():
             src_embedding_ids=(embedding_id, embedding_id2),
             src_relation_ids=(relation_id,),
             min_samples=1,
+            keep_training_data=True,
         )
+
+        __evaluation = db.evaluate_generalized_procrustes(min_samples=1, find_neighbours=True)
+        for src_embedding_id, dest_embedding_id, ranks, top_dis, true_dis in __evaluation:
+            assert src_embedding_id in (embedding_id, embedding_id2)
+            assert dest_embedding_id in (embedding_id, embedding_id2)
+            assert src_embedding_id != dest_embedding_id
+            assert (ranks >= 0).all()  # Ranks must be non-negative
+            assert (top_dis >= 0).all()  # Distance must be non-negative
+            assert (top_dis <= 2).all()  # Euclidean distance of normalized vectors
+            assert (true_dis >= 0).all()  # Distance must be non-negative
+            assert (true_dis <= 2).all()  # Euclidean distance of normalized vectors
+
+        db.forget_generalized_procrustes_training_data()
 
         gpa = db.load_generalized_procrustes_analysis(gpa_id=gpa_id)
         assert isinstance(gpa, GeneralizedProcrustesAnalysis)
@@ -85,9 +99,12 @@ def test_db():
 
         ################################################################################################################
 
-        missing, inserted = db.try_load_missing_thumbs()
-        assert missing == 0
-        assert inserted == 1
+        db.thumbs_load()
+        db.thumbs_finish(block=True)
+        _progress = db.thumbs_progress
+        assert _progress.computed == 1
+        assert _progress.nulls == 0
+        assert db.thumbs_count_missing() == 0
 
         ################################################################################################################
 

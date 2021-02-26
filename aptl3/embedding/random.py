@@ -1,4 +1,5 @@
 from hashlib import md5
+from urllib.request import urlopen
 
 import numpy as np
 
@@ -18,7 +19,8 @@ class NonLSHEmbedding(Embedding):
 
     def transform(self, *, url: str = None, data: bytes = None) -> np.ndarray:
         if data is None:
-            raise NotImplementedError
+            with urlopen(url=url) as f:
+                data = f.read(-1)
         h = md5()
         h.update(data)
         _hash = h.digest()

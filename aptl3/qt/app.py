@@ -54,9 +54,15 @@ class Application(QApplication):
         db = QSqlDatabase.addDatabase('QSQLITE')
         db.setConnectOptions('QSQLITE_OPEN_READONLY;QSQLITE_OPEN_URI;QSQLITE_ENABLE_SHARED_CACHE')
         db.setDatabaseName(self.py_db.get_db_file())
-        if not db.open() or not db.exec(Database.get_attach_results_db_query()):
-            raise RuntimeError(db.lastError().text())
+        assert db.open(), db.lastError().text()
+        q = db.exec(self.py_db.get_attach_results_db_query())
+        assert q.isActive(), q.lastError().text()
         self._db = db
+
+        q = db.exec("SELECT results_id, metadata FROM results.Results")
+        assert q.isActive(), q.lastError().text()
+        while q.next():
+            logging.debug(f'QSqlite results.Results id={q.value(0)!r} metadata={q.value(1)!r}')
 
     def disconnect_db(self):
         if self._db is not None:

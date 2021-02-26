@@ -1,6 +1,3 @@
-import marshal
-import zlib
-
 from PyQt5.QtCore import QMargins, Qt, QSize, QModelIndex, QByteArray
 from PyQt5.QtGui import QBrush, QPainter, QPixmap, QPixmapCache
 from PyQt5.QtSql import QSqlQuery

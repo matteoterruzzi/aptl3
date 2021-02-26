@@ -1,9 +1,11 @@
 import logging
+import os
+from urllib.request import pathname2url, url2pathname
 
 from PyQt5.QtCore import Qt, QSize, QModelIndex, QByteArray, QCoreApplication
-from PyQt5.QtGui import QCloseEvent
+from PyQt5.QtGui import QCloseEvent, QDragEnterEvent, QDropEvent
 from PyQt5.QtSql import QSqlQueryModel, QSqlQuery
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLineEdit, QDialog
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLineEdit, QFileDialog
 
 from .media_view import MediaView
 from ..db import Database
@@ -19,6 +21,7 @@ class HomeWidget(QWidget):
 
         self.setWindowTitle(self.__class__.__module__.rsplit('.', 1)[0])
         self.setContentsMargins(0, 0, 0, 0)
+        self.setAcceptDrops(True)
 
         self.vbox = QVBoxLayout(self)
         self.vbox.setContentsMargins(0, 0, 0, 0)
@@ -58,25 +61,27 @@ class HomeWidget(QWidget):
             self.model.clear()
             QCoreApplication.processEvents()
 
-            query = QSqlQuery()
-            query.exec('DETACH results')
-            if not query.isActive():
-                print('detach query:', query.lastQuery())
-                print('detach query error:', query.lastError().text())
-                print('model query:', self.model.query().lastQuery())
-                print('model query error:', self.model.lastError().text())
-                return
-
-            query = QSqlQuery()
-            query.exec(Database.get_attach_results_db_query())
-            if not query.isActive():
-                print('attach query:', query.lastQuery())
-                print('attach query error:', query.lastError().text())
-                return
-
-            line = self.text.text()
+            line = self.text.text().strip()
             if not line:
                 self.model.setQuery("SELECT DISTINCT media_id from ManifoldItems NATURAL JOIN Manifolds WHERE ready;")
+                return
+
+            if line == '@import':
+                _source_dir = QFileDialog.getExistingDirectory(
+                    self, "Select a directory to import", "",
+                    QFileDialog.DontResolveSymlinks | QFileDialog.ReadOnly)
+                _source_dir = os.path.abspath(_source_dir)
+                assert os.path.isdir(_source_dir)
+                self._logger.info(f"Starting ingestion of {_source_dir}")
+                self._py_db.ingest_file_directory(_source_dir)  # NOTE: this will freeze the GUI for a long time!
+                self._py_db.notify_bg_manifold_build()
+                self._py_db.thumbs_load()
+                self._logger.info(f"Ingestion finished. ")
+                _source_dir_url_like = 'file:' + pathname2url(_source_dir) + '%'
+                query = QSqlQuery()
+                query.prepare('SELECT media_id FROM MediaLocations WHERE url LIKE ? ORDER BY url')
+                query.bindValue(0, _source_dir_url_like)
+                self.model.setQuery(query)
                 return
 
             results_id, inserted = self._py_db.search(line, n=1000, search_k=-1)
@@ -96,9 +101,87 @@ class HomeWidget(QWidget):
             if not query.isActive():
                 self._logger.debug(f'results query: {query.lastQuery():s}')
                 self._logger.error(f'results query error: {query.lastError().text():s}')
-            self.model.setQuery(query_s)
+            self.model.setQuery(query)
         except Exception:
             import traceback
             traceback.print_exc()
         finally:
             self.setCursor(Qt.ArrowCursor)
+
+    def dragEnterEvent(self, a0: QDragEnterEvent) -> None:
+        data = a0.mimeData()
+        if not data.hasFormat('text/uri-list'):
+            a0.ignore()
+            return
+        a0.accept()
+        a0.setDropAction(Qt.LinkAction)
+
+    def dropEvent(self, a0: QDropEvent) -> None:
+        data = a0.mimeData()
+        action = a0.dropAction()
+        if action == Qt.IgnoreAction:
+            a0.ignore()
+            return
+        if not data.hasFormat('text/uri-list'):
+            a0.ignore()
+            return
+        a0.accept()
+        self.setCursor(Qt.WaitCursor)
+        self.model.clear()
+        QCoreApplication.processEvents()
+
+        ul = data.data('text/uri-list').data().decode().splitlines()
+        ul = map(str.strip, ul)
+        ul = filter(lambda _uri: not _uri.startswith('#'), ul)
+        ul = ['file:/'+_uri[len('file:///'):] if _uri.startswith('file:///') else _uri for _uri in ul]
+        ul = list(ul)
+
+        file_binds = []
+        dir_binds = []
+
+        # Ingest file and dirs from received uri-list
+        for uri in ul:
+            if uri.startswith('file:'):
+                pathname = url2pathname(uri[len('file:'):])
+                if os.path.isdir(pathname):
+                    self._logger.info(f'RECURSIVELY ADDING {pathname}')
+                    out = self._py_db.ingest_file_directory(pathname)
+                    dir_binds.append(f'{uri}%')
+                    self._logger.debug(f'ingest_file_directory({pathname}) -> {out}')
+                    continue
+
+            self._logger.info(f'ADDING {uri}')
+            media_id, flags, ex = self._py_db.try_ingest_url(uri)
+            if ex is not None:
+                self._logger.exception(f'FAILING {uri}: {ex}')
+            else:
+                file_binds.append(uri)
+                self._logger.debug(f'{media_id=} {flags=} {ex=}')
+
+        self._py_db.notify_bg_manifold_build()
+        self._py_db.thumbs_load()
+
+        # Build WHERE expression with file and dir binds
+        conditions = []
+        file_placeholders = ', '.join('?'*len(file_binds))
+        if file_placeholders:
+            file_placeholders = f'url IN ({file_placeholders})'
+            conditions.append(file_placeholders)
+        conditions.extend(['url LIKE ?']*len(dir_binds))
+
+        # Prepare query and bind values for file and dirs
+        query = QSqlQuery()
+        query.prepare(f'SELECT media_id FROM MediaLocations WHERE {" OR ".join(conditions)} ORDER BY url')
+        i = -1
+        for i, bind in enumerate(file_binds):
+            query.bindValue(i, bind)
+        for j, bind in zip(range(i + 1, i + 1 + len(dir_binds)), dir_binds):
+            query.bindValue(j, bind)
+        query.exec()
+
+        if not query.isActive():
+            self._logger.debug(f'results query: {query.lastQuery():s}')
+            self._logger.error(f'results query error: {query.lastError().text():s}')
+
+        self.model.setQuery(query)
+        self.setCursor(Qt.ArrowCursor)

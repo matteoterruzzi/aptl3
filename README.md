@@ -58,7 +58,7 @@ $ python -m aptl3 load_coco "" train2017 --limit 10000
 $ python -m aptl3 manifolds "" new image 
 $ python -m aptl3 manifolds "" new sentence
 $ python -m aptl3 build_procrustes "" image sentence --relation 1
-$ python -m aptl3 make_thumbs ""
+$ python -m aptl3 thumbs ""
 $ python -m aptl3 qt ""
 ```
 (The empty double quotes indicate the use of the default data directory for the storage of the database.)
