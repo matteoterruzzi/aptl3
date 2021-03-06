@@ -30,8 +30,9 @@ for any small amount of files available for user trials.
 - multi-modal feature vector extraction via pretrained models (PyTorch)
 	- image feature extraction derived from state-of-the-art [OFA network](https://hanlab.mit.edu/projects/ofa/)
 	- state-of-the-art text embeddings using [sentence transformers](https://www.sbert.net/)
+	- comparison with already-multimodal [CLIP model by OpenAI](https://github.com/openai/CLIP)
 - cross-modal retrieval via procrustean embedding translation (sci-py)
-- fast approximate nearest neighbors search engine (Annoy)
+- fast approximate nearest neighbors search engine ([Annoy](https://github.com/spotify/annoy))
 - zero-configuration embedded DB for millions of items (sqlite3)
 - thumbnail extractors for many media formats (Pillow, currently images only)
 - easy to use, cross-platform desktop app with intuitive GUI (PyQt5)
@@ -54,7 +55,7 @@ extract the feature embeddings (it will work incrementally in case of interrupti
 build a cross-modal retrieval model,
 make the thumbnails and finally launch the Qt application:
 ```bash
-$ python -m aptl3 load_coco "" train2017 --limit 10000
+$ python -m aptl3 load_coco "" "./your/coco/directory" train2017 --limit 10000
 $ python -m aptl3 manifolds "" new image 
 $ python -m aptl3 manifolds "" new sentence
 $ python -m aptl3 build_procrustes "" image sentence --relation 1

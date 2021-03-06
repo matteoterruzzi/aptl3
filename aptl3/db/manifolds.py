@@ -80,14 +80,25 @@ class ManifoldsDatabase(LocationsDatabase, EmbeddingsDatabase):
         index = self._get_annoy_index(manifold_id)
         return index.get_item_vector(item_i)
 
-    def get_media_vectors(self, media_id: bytes) -> Iterable[Tuple[int, Any]]:
+    def get_media_vectors(self, media_id: bytes, *,
+                          embedding_id: Optional[int] = None,
+                          ) -> Iterable[Tuple[int, Any]]:
         """Yields embedding vector data for the given media, stored in any ready manifold."""
-        c = self._db.execute(
-            'SELECT M.embedding_id, MI.manifold_id, MI.item_i '
-            'FROM ManifoldItems MI NATURAL JOIN Manifolds M '
-            'WHERE M.ready AND MI.media_id = ? AND MI.item_i IS NOT NULL', (media_id,))
-        for embedding_id, manifold_id, item_i in c:
-            yield embedding_id, self.get_item_vector(manifold_id, item_i)
+        if embedding_id is None:
+            c = self._db.execute(
+                'SELECT M.embedding_id, MI.manifold_id, MI.item_i '
+                'FROM ManifoldItems MI NATURAL JOIN Manifolds M '
+                'WHERE M.ready AND MI.media_id = ? AND MI.item_i IS NOT NULL', (media_id,))
+            for embedding_id, manifold_id, item_i in c:
+                yield embedding_id, self.get_item_vector(manifold_id, item_i)
+        else:
+            c = self._db.execute(
+                'SELECT MI.manifold_id, MI.item_i '
+                'FROM ManifoldItems MI NATURAL JOIN Manifolds M '
+                'WHERE M.ready AND MI.media_id = ? AND MI.item_i IS NOT NULL '
+                'AND M.embedding_id = ?', (media_id, embedding_id))
+            for manifold_id, item_i in c:
+                yield embedding_id, self.get_item_vector(manifold_id, item_i)
 
     def find_vector_neighbours(
             self, embedding_id: int, vector, *,
@@ -627,11 +638,17 @@ class ManifoldsDatabase(LocationsDatabase, EmbeddingsDatabase):
 class _MaybeFetchActor(Actor):
     def __init__(self, db_data_dir):
         super().__init__()
-        self.db = LocationsDatabase(data_dir=db_data_dir)
+        self.db_data_dir = db_data_dir
+        self.db = None
+
+    def init(self) -> None:
+        self.db = LocationsDatabase(data_dir=self.db_data_dir)
 
     def receive(self, msg: Any):
         media_id, url = msg
         try:
+            # media_id, _ = self.db.ingest_url(url, update_last_access=False)
+            # FIXME: relying on old media_id-url association (could have changed the file or the hash function)
             data = None if url.startswith('file:') else self.db.fetch(url)
         except Exception as ex:
             _, __, tb = sys.exc_info()

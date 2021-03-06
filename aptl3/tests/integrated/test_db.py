@@ -43,7 +43,7 @@ def test_db():
         c = db.execute('SELECT * FROM results.ResultsMedia WHERE results_id = ?', (results_id,))
         rows = c.fetchall()
         assert len(rows) == 1
-        _results_id, _media_id, _info, _rank = rows[0]
+        _results_id, _media_id, _rank = rows[0]
         assert _results_id == results_id
         assert _media_id == media_id
         assert 0 <= _rank
@@ -92,7 +92,7 @@ def test_db():
         c = db.execute('SELECT * FROM results.ResultsMedia WHERE results_id = ?', (results_id,))
         rows = c.fetchall()
         assert len(rows) == 4
-        for _results_id, _media_id, _info, _rank in rows:
+        for _results_id, _media_id, _rank in rows:
             assert _results_id == results_id
             assert _media_id == media_id
             assert 0 <= _rank

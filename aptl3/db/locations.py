@@ -199,13 +199,28 @@ class LocationsDatabase(SchemaDatabase):
                 'WHERE media_id = :new_media_id',
                 {'old_media_id': old_media_id, 'new_media_id': new_media_id})
             c.execute(
+                'DELETE FROM Thumbnails WHERE media_id = :new_media_id',
+                {'old_media_id': old_media_id, 'new_media_id': new_media_id})
+            c.execute(
                 'UPDATE Thumbnails SET media_id = :new_media_id WHERE media_id = :old_media_id',
+                {'old_media_id': old_media_id, 'new_media_id': new_media_id})
+            c.execute(
+                'DELETE FROM ManifoldItems WHERE media_id = :new_media_id',
                 {'old_media_id': old_media_id, 'new_media_id': new_media_id})
             c.execute(
                 'UPDATE ManifoldItems SET media_id = :new_media_id WHERE media_id = :old_media_id',
                 {'old_media_id': old_media_id, 'new_media_id': new_media_id})
             c.execute(
+                'DELETE FROM ManifoldHoles WHERE media_id = :new_media_id',
+                {'old_media_id': old_media_id, 'new_media_id': new_media_id})
+            c.execute(
                 'UPDATE ManifoldHoles SET media_id = :new_media_id WHERE media_id = :old_media_id',
+                {'old_media_id': old_media_id, 'new_media_id': new_media_id})
+            c.execute(
+                'DELETE FROM MediaRelations WHERE media_id = :new_media_id',
+                {'old_media_id': old_media_id, 'new_media_id': new_media_id})
+            c.execute(
+                'DELETE FROM MediaRelations WHERE other_media_id = :new_media_id',
                 {'old_media_id': old_media_id, 'new_media_id': new_media_id})
             c.execute(
                 'UPDATE MediaRelations SET media_id = :new_media_id WHERE media_id = :old_media_id',

@@ -19,6 +19,15 @@ class Embedding(ABC):
         """{python_module}/{handle}"""
         raise NotImplementedError
 
+    def get_space(self) -> str:
+        """If two embeddings have the same space string, then distance between two vectors can be calculated."""
+        return self.get_version()
+
+    # noinspection PyMethodMayBeStatic
+    def get_modality(self) -> Optional[str]:
+        """Maybe just a comment, or a hint for search methods to distinguish embeddings in the same space."""
+        return None
+
     @abstractmethod
     def transform(self, *, url: Optional[str] = None, data: Optional[bytes] = None) -> ndarray:
         raise NotImplementedError

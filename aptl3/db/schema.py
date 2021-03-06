@@ -64,6 +64,12 @@ class SchemaDatabase:
                             f'Allowing audited open of .pytest_cache file: '
                             f'{name}({", ".join(map(repr, args))})')
                         return
+                    if f'{os.path.sep}.cache{os.path.sep}JetBrains{os.path.sep}' in os.path.abspath(file) \
+                            and file.endswith('.pstat'):
+                        logging.warning(
+                            f'Allowing audited open of python profile: '
+                            f'{name}({", ".join(map(repr, args))})')
+                        return
                     raise RuntimeError(
                         f'Denying audited open with write mode on file outside data dir: '
                         f'{name}({", ".join(map(repr, args))})')

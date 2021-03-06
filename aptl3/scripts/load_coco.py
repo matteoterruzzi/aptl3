@@ -58,7 +58,7 @@ def load_coco(db: Database, *,
 
     def _gen_pairs():
         for i, id_ in zip(range(max_samples), coco.getImgIds()):
-            img_url = coco.imgs[id_]['coco_url']
+            img_url = str(coco.imgs[id_]['coco_url']).strip()
             img_media_id, _flags = db.ingest_url(img_url, commit=False, update_last_access=False)
 
             _ann_ids = coco.getAnnIds(id_)
@@ -66,7 +66,7 @@ def load_coco(db: Database, *,
                 _ann_ids = [random.choice(list(_ann_ids))]
 
             for ann_id in _ann_ids:
-                ann_url = 'data:,' + coco.anns[ann_id]['caption']
+                ann_url = 'data:,' + str(coco.anns[ann_id]['caption']).strip()
                 ann_media_id, _flags = db.ingest_url(ann_url, commit=False, update_last_access=False)
 
                 yield img_media_id, ann_media_id

@@ -731,7 +731,10 @@ class _ActorSystemMonitorThread(threading.Thread):
                 f'{s.__class__.__module__}.{s.__class__.__name__} '
                 f'at 0x{id(self):x} '
                 f'waiting   {self.__actor_system.status}')
-        s.join_pending()
+        try:
+            s.join_pending()
+        except RuntimeError:
+            logger.error(f'Error while joining the actor system. Stopping it.', exc_info=True)
         s.stop()
         logger.info(
             f'{s.__class__.__module__}.{s.__class__.__name__} '

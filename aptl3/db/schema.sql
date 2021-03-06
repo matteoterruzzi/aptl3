@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS Embeddings (
     dim SMALLINT NOT NULL,
     name TEXT NOT NULL UNIQUE,  -- short name
     version TEXT NOT NULL DEFAULT '',  -- model and version identifier
+    space TEXT NULL DEFAULT NULL,  -- same non-null space => can calculate distance between two vectors
+    modality TEXT NULL DEFAULT NULL,  -- maybe just a comment, or a hint for search methods
     ready BOOLEAN NOT NULL DEFAULT 0
 );
 

@@ -87,14 +87,8 @@ class HomeWidget(QWidget):
             results_id, inserted = self._py_db.search(line, n=1000, search_k=-1)
 
             query_s = (
-                f'WITH ResultsStats AS (SELECT MIN(rank)+0.55 AS min_rank, MAX(rank)-MIN(rank) AS rank_range '
-                f'                      FROM results.ResultsMedia WHERE results_id = {results_id:d}) '
-                f'SELECT media_id FROM ('
-                f'   SELECT media_id, min(rank) AS mrank '
-                f'   FROM results.ResultsMedia '
-                f'   WHERE results_id = {results_id:d} '
-                f'   GROUP BY media_id ORDER BY mrank) '
-                f'WHERE mrank - (SELECT min_rank FROM ResultsStats) <= (SELECT rank_range / 2 FROM ResultsStats)')
+                f'SELECT media_id FROM results.ResultsMediaFiltered '
+                f'WHERE results_id = {results_id:d} ORDER BY rank ASC')
 
             query = QSqlQuery()
             query.exec(query_s)
