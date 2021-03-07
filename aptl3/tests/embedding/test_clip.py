@@ -1,10 +1,18 @@
 import os
 import numpy as np
 from urllib.request import pathname2url
+import pytest
 
-from ...embedding.openai_clip import ClipTextEmbedding, ClipImageEmbedding
+try:
+    import clip
+except ImportError:
+    _NO_CLIP = True
+else:
+    _NO_CLIP = False
+    from ...embedding.openai_clip import ClipTextEmbedding, ClipImageEmbedding
 
 
+@pytest.mark.skipif(_NO_CLIP, reason='clip-by-openai not installed.')
 def test_image_shape_norm():
     _url = 'file:' + pathname2url(os.path.join(os.path.dirname(__file__), '../rose.jpg'))
 
@@ -15,6 +23,7 @@ def test_image_shape_norm():
     assert abs(float(np.linalg.norm(v, ord=2, axis=None, keepdims=False) - 1.)) < 1.0e-5
 
 
+@pytest.mark.skipif(_NO_CLIP, reason='clip-by-openai not installed.')
 def test_text_batching():
     _urls = [
         'data:,This is a sentence for the test case.',
