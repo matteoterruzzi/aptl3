@@ -1,5 +1,4 @@
 annoy~=1.17
-clip-by-openai
 ofa>=0.1.0
 Pillow~=7.2
 PyQt5~=5.15
