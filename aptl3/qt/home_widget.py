@@ -33,8 +33,8 @@ class HomeWidget(QWidget):
         self.vbox.addWidget(self.text)
 
         self.model = QSqlQueryModel()
-        # model.setQuery("Select Media.id from Media;")
-        self.model.setQuery("SELECT DISTINCT media_id from ManifoldItems NATURAL JOIN Manifolds WHERE ready;")
+        self.model.setQuery("SELECT media_id from Media;")
+        # self.model.setQuery("SELECT DISTINCT media_id from ManifoldItems NATURAL JOIN Manifolds WHERE ready;")
 
         self.grid = MediaView()
         self.grid.setModel(self.model)
@@ -63,7 +63,8 @@ class HomeWidget(QWidget):
 
             line = self.text.text().strip()
             if not line:
-                self.model.setQuery("SELECT DISTINCT media_id from ManifoldItems NATURAL JOIN Manifolds WHERE ready;")
+                self.model.setQuery("SELECT media_id from Media;")
+                # self.model.setQuery("SELECT DISTINCT media_id from ManifoldItems NATURAL JOIN Manifolds WHERE ready;")
                 return
 
             if line == '@import':

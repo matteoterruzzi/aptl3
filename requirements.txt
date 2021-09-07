@@ -1,6 +1,7 @@
 annoy~=1.17
+# clip-by-openai>=0.1.1.4
 ofa>=0.1.0
-Pillow~=7.2
+Pillow~=8.2
 PyQt5~=5.15
 pycocotools~=2.0
 numpy
